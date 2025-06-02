@@ -1,0 +1,298 @@
+---
+title: "Untitled"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Author: Marie Vibeke Vestergaard
+
+This file is defining the cohort of the study.
+It also generates the outcomes to be investigated in the project and outputs phenotype and covariate file for GWAS.
+
+Read in packages:
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(stringr)
+library(tidyr)
+library(ggpubr)
+```
+
+Paths:
+```{r}
+path_SSI <- "/ngc/projects2/predict_r/research/data/ssi_genotype/2023-02"
+path_project <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD"
+path_basefiles <- "/ngc/projects2/predict_r/research/data/basefiles/2023-07" 
+path_registers <- "/ngc/projects2/predict_r/research/data/sds_registers/2022-09" 
+```
+
+## Number of all genotyped UC patients (before QC):
+```{r}
+#All genotyped
+all <- read.csv("/ngc/projects2/predict_r/research/data/ssi_genotype/2023-02/IBD_OCT2022.fam", sep=" ", header=F)
+
+#Load file with information on IBD patients (diagnosis and date of diagnosis)
+full_ibd_cohort <- read.csv(paste0(path_project, "/GeneratedData/cohort_information/complementary_files/All_IBD_patients.csv"), sep=";")
+
+#Combine:
+colnames(all)[2] <- "lbnr"
+full_ibd_cohort$lbnr <- as.character(full_ibd_cohort$lbnr)
+all <- left_join(all, full_ibd_cohort, by="lbnr")
+
+#Load file to map patients to NorDIBD versus NBS cohort:
+nordibd <- read.csv(paste0(path_SSI, "/gastro_exclude.fam"), sep=" ", header=F)
+all <- all %>% mutate(cohort = ifelse(lbnr %in% as.character(nordibd$V2), "NorDIBD", "NBS"))
+
+```
+
+## Defining the cohort:
+Read in data on genotyped individuals
+```{r}
+#Lbnr of all genotyped individuals passing QC
+df <- read.csv(paste0(path_project, "/GeneratedData/postImp/Defined_cohort_info.txt"), sep=" ", header=T) 
+df <- left_join(df, all, by="lbnr")
+```
+
+Remove NBS cohort samples related to NorDIBD cohort samples:
+```{r}
+#Read in generated "relatedness" file:
+rel <- read.csv(paste0(path_project, "/GeneratedData/QC1/related_across_cohorts_PKU.txt"), sep="\t", header=F)
+
+df <- df %>% filter(!(lbnr %in% rel$V1))
+```
+
+Combine with full ibd cohort file to gain insight on disease:
+```{r}
+#Keep only UC and UC_unc (UC_unc = UC patients, but with some CD records)
+df_sub <- df %>% filter(final_diag=="UC"|final_diag == "UC_unc")
+
+#Keep only those diagnosed after 1996-01-01:
+df_sub1 <- df_sub %>% filter(as.Date(diag_date)>=as.Date("1996-01-01"))
+
+```
+
+"End of study" date is 2022-09-01.
+Remove patients without 3 years of follow-up:
+```{r}
+df_sub2 <- df_sub1 %>% filter(diag_date <= as.Date("2022-09-01")-years(3))
+cohort <- df_sub2 %>% select(lbnr, cohort, sex, diag_age, diag_date, final_diag)
+
+#Merge with CPR register - did any die, disappear or emigrate within the follow-up time?
+cpr <- read.csv(paste0(path_registers, "/t_person.csv"), sep=";") %>% select(lbnr, C_STATUS, D_STATUS_HEN_START)
+cpr$lbnr <- as.character(cpr$lbnr)
+cpr <- cpr %>% filter(C_STATUS %in% c(70,80,90))
+sum(duplicated(cpr$lbnr)) #each lbnr only appears once
+cohort <- left_join(cohort, cpr, by = "lbnr")
+cohort$diag_date <- as.Date(cohort$diag_date)  
+cohort <- cohort %>% filter(!(!is.na(C_STATUS) & as.Date(D_STATUS_HEN_START)<=diag_date+years(3)))
+
+rm(df, df_sub1, df_sub2, cpr)
+```
+
+
+## Generation of outcome:
+
+Generate outcomes for the follow-up period:
+Severe vs. less severe patients. Severe prognosis:
+   >=5000 mg of systemic corticosteorids or
+   >=2 CD-related hospitalizations (inpatient visits) > 2 days or
+   >=1 CD-related major surgeries 
+  
+Find number of hospitalizations:
+```{r}
+#Read in IBD-related hospital contacts:
+ibd_contacts <- read.csv(paste0(path_project, "/GeneratedData/cohort_information/complementary_files/IBD_contacts.csv"), sep=";")
+ibd_contacts$D_INDDTO <- as.Date(ibd_contacts$D_INDDTO)
+ibd_contacts$D_UDDTO <- as.Date(ibd_contacts$D_UDDTO)
+
+#We are only interested in inpatient contacts longer than 2 days:
+ibd_contacts <- ibd_contacts %>% filter(C_PATTYPE3 == "Inpatient") %>% filter(as.numeric(D_UDDTO-D_INDDTO)>2) %>% filter(lbnr %in% !!cohort$lbnr)
+ibd_contacts$lbnr <- as.character(ibd_contacts$lbnr)
+
+#Merge with dataset and keep only contacts within follow-up time:
+ibd_contacts <- left_join(ibd_contacts, cohort, by = "lbnr")
+ibd_contacts$diag_date <- as.Date(ibd_contacts$diag_date)
+ibd_contacts1 <- ibd_contacts %>% filter(D_INDDTO>=diag_date & D_INDDTO<=diag_date+years(3))
+
+#Count number of hospitalizations in period and merge with cohort
+ibd_contacts3 <- ibd_contacts1 %>% group_by(lbnr) %>% summarise(outcome1a = n())
+cohort <- left_join(cohort, ibd_contacts3, by = "lbnr")
+cohort$outcome1a <- ifelse(is.na(cohort$outcome1a), 0, cohort$outcome1a)
+
+```
+
+Find number of major surgeries:
+```{r}
+#Read in surgery data (both LPR2 and LPR3):
+ibd_surgeries <- read.csv(paste0(path_basefiles, "/ibd_patients_all_procedures.csv"), sep=";")
+ibd_surgeries_lpr3 <- read.csv(paste0(path_basefiles, "/ibd_patients_all_procedures_lpr3.csv"), sep=";")
+
+#Major surgeries (selected by Kristine Allin):
+ibd_surgeries <- ibd_surgeries %>% filter(grepl(paste("KJGB", "KJFB", "KJFC", "KJFF", "KJFH", "KJFA60", "KJFA61", "KJFA63", "KJFA96", "KJFA97", "KJFW", "KJFL", sep="|"), C_OPR)) %>% filter(!(C_OPR %in% c("KJFB10", "KJFB13")))
+
+ibd_surgeries_lpr3 <- ibd_surgeries_lpr3 %>% filter(grepl(paste("KJGB", "KJFB", "KJFC", "KJFF", "KJFH", "KJFA60", "KJFA61", "KJFA63", "KJFA96", "KJFA97", "KJFW", "KJFL", sep="|"), procedurekode)) %>% filter(!(procedurekode %in% c("KJFB10", "KJFB13")))
+
+#Combine:
+ibd_surgeries_lpr3 <- ibd_surgeries_lpr3 %>% select(lbnr, dato_start, procedurekode)
+colnames(ibd_surgeries_lpr3) <- colnames(ibd_surgeries)
+ibd_surgeries_all <- rbind(ibd_surgeries, ibd_surgeries_lpr3)
+
+#Combine with cohort and keep only contacts within follow-up time:
+ibd_surgeries_all$lbnr <- as.character(ibd_surgeries_all$lbnr)
+ibd_surgeries_all <- left_join(ibd_surgeries_all %>% filter(lbnr %in% cohort$lbnr), cohort, by = "lbnr")
+ibd_surgeries_all$D_ODTO <- as.Date(ibd_surgeries_all$D_ODTO)
+ibd_surgeries_all$diag_date <- as.Date(ibd_surgeries_all$diag_date)
+ibd_surgeries_all1 <- ibd_surgeries_all %>% filter(D_ODTO>=diag_date & D_ODTO<=diag_date+years(3))
+
+#Count number of surgeries in period and merge with cohort
+ibd_surgeries_all3 <- ibd_surgeries_all1 %>% group_by(lbnr) %>% summarise(outcome1b = n())
+cohort <- left_join(cohort, ibd_surgeries_all3, by = "lbnr")
+cohort$outcome1b <- ifelse(is.na(cohort$outcome1b), 0, cohort$outcome1b)
+```
+
+
+Find medication:
+```{r}
+medication <- read.csv(paste0(path_basefiles, "/ibd_patients_all_medications.csv"), sep=";")
+
+#Keep only systemic corticosteroids:
+medication <- medication %>% filter(atc %in% c("H02AB01", "H02AB02", "H02AB04", "H02AB06", "H02AB07", "H02AB08", "H02AB09")) %>% filter(lbnr %in% cohort$lbnr)
+medication$packsize <- as.numeric(medication$packsize)
+medication$strnum <- as.numeric(medication$strnum)
+
+#Remove strunit = .
+medication <- medication %>% filter(strunit != ".")
+
+#Calculate total mg (MG and MGM (mg/ml) units for tablets and injections. The calculation is the same since "packsize" for tablets is number of tablets/package and "packsize" for inj. are number of ml)
+medication <- medication %>% mutate(dosis = apk*packsize*strnum) # number of packages * tablets/ml pr package * strength of tables/ml
+
+#Combine with cohort and keep only contacts within follow-up time:
+medication$lbnr <- as.character(medication$lbnr)
+medication <- left_join(medication %>% filter(lbnr %in% cohort$lbnr), cohort, by = "lbnr")
+medication$eksd <- as.Date(medication$eksd)
+medication$diag_date <- as.Date(medication$diag_date)
+medication <- medication %>% filter(eksd>=diag_date & eksd<=diag_date+years(3))
+
+#Count total amount of medicine in period and merge with cohort
+medication <- medication %>% group_by(lbnr) %>% summarise(outcome1c = sum(dosis))
+cohort <- left_join(cohort, medication, by = "lbnr")
+cohort$outcome1c <- ifelse(is.na(cohort$outcome1c), 0, cohort$outcome1c)
+
+rm(medication)
+```
+
+Combine and make binary outcome:
+```{r}
+cohort <- cohort %>% mutate(outcome2 = ifelse(outcome1c >= 5000 | outcome1a >= 2 | outcome1b>=1, 2, 1))
+
+table(cohort$outcome2)
+
+#Save file with all elements:
+write.table(cohort, file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/Phenotype_file_v2.csv"), sep=" ", col.names=T, quote=F, row.names=F)
+```
+
+
+## Make files for GWAS:
+
+Divide into PKU and NorDIBD cohort and make file with covariates and phenotypes:
+```{r}
+cohort <- read.csv(file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/Phenotype_file_v2.csv"), sep=" ", header=T)
+cohort$lbnr <- as.character(cohort$lbnr)
+cohort <- cohort%>%rename(FID=V1, IID = lbnr) %>% mutate(IIDnew = paste0(FID, "_", IID))
+cohort <- cohort %>% mutate(year = year(diag_date))
+
+#NBS cohort
+cohort_NBS <- cohort %>% filter(cohort == "NBS") %>% select(FID, IID, IIDnew, sex, diag_age, year, outcome2)
+
+#Merge with IDs and order: FID, IID, covariates, phenotypes
+write.table(cohort_NBS %>% select(FID, IID, sex, diag_age, year, outcome2), file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/PKU/Phenotype_file_NBS_wHeader.csv"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#Now with the new ID
+write.table(cohort_NBS %>% select(IIDnew, sex, diag_age, year,outcome2), file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/PKU/Phenotype_file_NBS_wHeader_geneID.csv"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#NorDIBD cohort
+cohort_nordibd <- cohort %>% filter(cohort == "NorDIBD")%>% select(FID, IID, IIDnew, sex, diag_age,year, outcome2)
+
+#Merge with PCs and order: FID, IID, covariates, phenotypes
+write.table(cohort_nordibd %>% select(FID, IID, sex, diag_age,year, outcome2), file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/NorDIBD/Phenotype_file_NorDIBD_wHeader.csv"), sep=" ", col.names=T, quote=F, row.names=F)
+write.table(cohort_nordibd %>% select(IIDnew, sex, diag_age,year, outcome2), file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/NorDIBD/Phenotype_file_NorDIBD_wHeader_geneID.csv"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#Save file with FID and IID for selecting the cohort:
+cohort <- rbind(cohort_NBS, cohort_nordibd)
+write.table(cohort %>% select(IIDnew), paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/Cohort_defined_geneID.txt"), col.names = T, row.names = F, quote = F)
+write.table(cohort %>% select(FID, IID), paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/Cohort_defined.txt"), col.names = T, row.names = F, quote = F)
+```
+
+## Characterise study population
+```{r}
+cohort <- read.csv(file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/Phenotype_file_v2.csv"), sep=" ")
+cohort_NBS <-  cohort %>% filter(cohort=="NBS")
+cohort_nordibd <- cohort %>% filter(cohort == "NorDIBD")
+
+#Sex
+sum(cohort$sex == "F")
+sum(cohort$sex == "F")/dim(cohort)[1]*100
+sum(cohort$sex == "M")
+sum(cohort$sex == "M")/dim(cohort)[1]*100
+
+sum(cohort_NBS$sex == "F")
+sum(cohort_NBS$sex == "F")/dim(cohort_NBS)[1]*100
+sum(cohort_NBS$sex == "M")
+sum(cohort_NBS$sex == "M")/dim(cohort_NBS)[1]*100
+
+sum(cohort_nordibd$sex == "F")
+sum(cohort_nordibd$sex == "F")/dim(cohort_nordibd)[1]*100
+sum(cohort_nordibd$sex == "M")
+sum(cohort_nordibd$sex == "M")/dim(cohort_nordibd)[1]*100
+
+#Age at UC diagnosis
+mean(cohort$diag_age)
+sd(cohort$diag_age)
+sum(cohort$diag_age<17)
+sum(cohort$diag_age>=17 & cohort$diag_age<40)
+sum(cohort$diag_age>=40)
+sum(cohort$diag_age<17)/dim(cohort)[1]*100
+sum(cohort$diag_age>=17 & cohort$diag_age<40)/dim(cohort)[1]*100
+sum(cohort$diag_age>=40)/dim(cohort)[1]*100
+
+sum(cohort_NBS$diag_age<17)
+sum(cohort_NBS$diag_age>=17 & cohort_NBS$diag_age<40)
+sum(cohort_NBS$diag_age>=40)
+sum(cohort_NBS$diag_age<17)/dim(cohort_NBS)[1]*100
+sum(cohort_NBS$diag_age>=17 & cohort_NBS$diag_age<40)/dim(cohort_NBS)[1]*100
+sum(cohort_NBS$diag_age>=40)/dim(cohort_NBS)[1]*100
+
+sum(cohort_nordibd$diag_age<17)
+sum(cohort_nordibd$diag_age>=17 & cohort_nordibd$diag_age<40)
+sum(cohort_nordibd$diag_age>=40)
+sum(cohort_nordibd$diag_age<17)/dim(cohort_nordibd)[1]*100
+sum(cohort_nordibd$diag_age>=17 & cohort_nordibd$diag_age<40)/dim(cohort_nordibd)[1]*100
+sum(cohort_nordibd$diag_age>=40)/dim(cohort_nordibd)[1]*100
+
+#Calendar year of diagnosis
+cohort_NBS <- cohort %>% filter(cohort == "PKU")
+cohort_NorDIBD <- cohort %>% filter(cohort == "NorDIBD")
+sum(cohort$diag_date<as.Date("2005-01-01"))
+sum(cohort$diag_date>=as.Date("2005-01-01") & cohort$diag_date<as.Date("2015-01-01"))
+sum(cohort$diag_date>=as.Date("2015-01-01"))
+sum(cohort$diag_date<as.Date("2005-01-01"))/dim(cohort)[1]*100
+sum(cohort$diag_date>=as.Date("2005-01-01") & cohort$diag_date<as.Date("2015-01-01"))/dim(cohort)[1]*100
+sum(cohort$diag_date>=as.Date("2015-01-01"))/dim(cohort)[1]*100
+
+sum(cohort_NBS$diag_date<as.Date("2005-01-01"))
+sum(cohort_NBS$diag_date>=as.Date("2005-01-01") & cohort_NBS$diag_date<as.Date("2015-01-01"))
+sum(cohort_NBS$diag_date>=as.Date("2015-01-01"))
+sum(cohort_NBS$diag_date<as.Date("2005-01-01"))/dim(cohort_NBS)[1]*100
+sum(cohort_NBS$diag_date>=as.Date("2005-01-01") & cohort_NBS$diag_date<as.Date("2015-01-01"))/dim(cohort_NBS)[1]*100
+sum(cohort_NBS$diag_date>=as.Date("2015-01-01"))/dim(cohort_NBS)[1]*100
+
+sum(cohort_NorDIBD$diag_date<as.Date("2005-01-01"))
+sum(cohort_NorDIBD$diag_date>=as.Date("2005-01-01") & cohort_NorDIBD$diag_date<as.Date("2015-01-01"))
+sum(cohort_NorDIBD$diag_date>=as.Date("2015-01-01"))
+sum(cohort_NorDIBD$diag_date<as.Date("2005-01-01"))/dim(cohort_nordibd)[1]*100
+sum(cohort_NorDIBD$diag_date>=as.Date("2005-01-01") & cohort_NorDIBD$diag_date<as.Date("2015-01-01"))/dim(cohort_nordibd)[1]*100
+sum(cohort_NorDIBD$diag_date>=as.Date("2015-01-01"))/dim(cohort_nordibd)[1]*100
+```
+

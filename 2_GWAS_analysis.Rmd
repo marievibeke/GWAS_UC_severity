@@ -1,0 +1,1402 @@
+---
+title: "Untitled"
+output: html_document
+date: "2023-07-28"
+editor_options: 
+  chunk_output_type: inline
+---
+
+Author: Marie Vibeke Vestergaard
+
+This file runs the GWAS analyses and meta-analysis.
+
+## Load packages and pathways in R:
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+
+path_project <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD"
+path_UC <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis"
+```
+
+## Select the cohort from the genetics data
+Select the cohort:
+```{bash, engine.opts='-l'}
+DIR=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData
+root=$DIR/postImp
+module load plink2/2.00alpha20221024
+module load tools
+module load gcc
+module load intel/perflibs
+module load R/4.0.0
+
+##Select cohort only
+plink2 --vcf $root/IBDimp.1to23_related1.vcf.gz --keep $DIR/cohort_information/UC_prognosis/Cohort_defined_geneID.txt --maf 0.01 --make-pgen --out $DIR/tryoutUC
+
+#Split FID_IID: This could not be done in the original conversion of the vcf file due to the FID_gastro_control_IID samples
+plink2 --pfile $DIR/tryoutUC --recode vcf --out $DIR/tryoutUC
+plink2 --vcf $DIR/tryoutUC.vcf --make-pgen --id-delim "_" --out $DIR/tryoutUC
+
+```
+
+
+Read in meta data of NBS and NorDIBD cohort and make files with covariates and phenotypes:
+```{r}
+#NBS cohort
+cohort_NBS <- read.csv(file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/PKU/Phenotype_file_NBS_wHeader.csv"), sep=" ") %>% mutate(IIDnew = paste0(FID, "_", IID)) %>% select(FID,IID, IIDnew, sex, diag_age,year, outcome2)
+cohort_NBS <- cohort_NBS %>% mutate(outcome2 = ifelse(outcome2 == 2, 1, 0))
+
+#Save files for analysis
+write.table(cohort_NBS %>% select(FID,IID, sex, diag_age,year), file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/PKU/Analysis_file_NBS_cov.csv"), sep=" ", col.names=T, quote=F, row.names=F)
+write.table(cohort_NBS %>% select(FID, IID, outcome2), file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/PKU/Analysis_file_NBS_phe.csv"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#Make list of individuals
+write.table(cohort_NBS%>% select(FID, IID), paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/Cohort_NBS.txt"), col.names = FALSE, row.names = FALSE, quote = F)
+write.table(cohort_NBS%>% select(IIDnew), paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/Cohort_NBS_geneID.txt"), col.names = FALSE, row.names = FALSE, quote = F)
+
+#NorDIBD cohort
+cohort_nordibd <- read.csv(file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/NorDIBD/Phenotype_file_NorDIBD_wHeader.csv"), sep=" ") %>% mutate(IIDnew = paste0(FID, "_", IID)) %>% select(FID,IID, IIDnew, sex, diag_age,year, outcome2)
+
+cohort_nordibd <- cohort_nordibd %>% mutate(outcome2 = ifelse(outcome2 == 2, 1, 0))
+
+#Save files for analysis
+write.table(cohort_nordibd %>% select(FID,IID, sex, diag_age,year), file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/NorDIBD/Analysis_file_NorDIBD_cov.csv"), sep=" ", col.names=T, quote=F, row.names=F)
+write.table(cohort_nordibd %>% select(FID,IID, outcome2), file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/NorDIBD/Analysis_file_NorDIBD_phe.csv"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#Make list of individuals
+write.table(cohort_nordibd%>% select(FID,IID), paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/Cohort_nordibd.txt"), col.names = FALSE, row.names = FALSE, quote = F)
+write.table(cohort_nordibd%>% select(IIDnew), paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/Cohort_nordibd_geneID.txt"), col.names = FALSE, row.names = FALSE, quote = F)
+
+```
+
+Some of variants are too sparse for NorDIBD cohort
+```{bash, engine.opts='-l'}
+DIR=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData
+root=$DIR/postImp
+
+module load plink2/2.00alpha20221024
+module load tools
+module load gcc
+module load intel/perflibs
+module load R/4.0.0
+
+##Select cohort only
+plink2 --pfile $DIR/tryoutUC --keep $DIR/cohort_information/UC_prognosis/Cohort_nordibd.txt --mac 5 --write-snplist --out $root/snps_nordibdUC
+
+```
+
+Run GWAS using regenie:
+Step 1 - use data before imputation, prepared for Regenie step 1:
+```{bash, engine.opts='-l'}
+
+DIR=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/postImp
+root=$DIR/IBD
+OUT=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output
+
+pheno1=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/PKU
+pheno2=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/NorDIBD
+
+keep1=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/Cohort_NBS.txt
+keep2=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/Cohort_nordibd.txt
+
+
+module load regenie/4.3
+module load tools
+module load gcc
+module load intel/perflibs
+module load R/4.0.0
+
+regenie \
+  --step 1 \
+  --pgen $OUT/Regenie_step1_prep \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --bt \
+  --out $OUT/UC_prognosis/Regenie_step1_NBS
+  
+#regenie \
+#  --step 1 \
+#  --pgen $OUT/Regenie_step1_prep \
+#  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+#  --catCovarList sex \
+#  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+#  --keep $keep2 \
+#  --bsize 1000 \
+#  --extract $DIR/snps_nordibdUC.snplist \
+#  --bt \
+#  --out $OUT/UC_prognosis/Regenie_step1_NorDIBD
+
+
+```
+
+Step 2:
+```{bash, engine.opts='-l'}
+
+DIR=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/postImp
+root=$DIR/IBD
+OUT=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output
+
+pheno1=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/PKU
+pheno2=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/NorDIBD
+
+keep1=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/Cohort_NBS.txt
+keep2=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/Cohort_nordibd.txt
+
+
+module load regenie/4.3
+module load tools
+module load gcc
+module load intel/perflibs
+module load R/4.0.0
+
+regenie \
+  --step 2 \
+  --pgen $DIR/tryoutUC \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/UC_prognosis/Regenie_step1_NBS_pred.list \
+  --out $OUT/UC_prognosis/Regenie_step2_NBS
+  
+#regenie \
+#  --step 2 \
+#  --pgen $DIR/tryoutUC \
+#  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+#  --catCovarList sex \
+#  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+#  --keep $keep2 \
+#  --bsize 1000 \
+#  --bt \
+#  --firth \
+#  --extract $DIR/snps_nordibdUC.snplist \
+#  --pThresh 0.01 \
+#  --pred $OUT/UC_prognosis/Regenie_step1_NorDIBD_pred.list \
+#  --out $OUT/UC_prognosis/Regenie_step2_NorDIBD
+
+
+```
+
+Prepare output for meta-analysis:
+Required: CHR, BP, SNP, A1, A2, P, OR, SE
+```{r}
+path <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis"
+
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+#rm(gwas_NBS)
+
+#NorDIBD
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+#rm(gwas_nord)
+
+```
+
+
+Run meta-analyses using plink1.9:
+```{bash, engine.opts='-l'}
+
+OUT=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis
+
+
+module load plink2/1.90beta6.18
+module load tools
+module load gcc
+module load intel/perflibs
+module load R/4.0.0
+
+###############
+#Meta-analyses#
+###############
+
+plink --meta-analysis $OUT/Regenie_step2_NBS_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_outcome2_prep.regenie + logscale --out $OUT/meta_regenie
+```
+
+
+## Investigate and plot results in R
+
+Read in libraries and pathways
+```{r}
+library(dplyr)
+library(ggplot2)
+library(qqman)
+library(ggpubr)
+
+path <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis"
+```
+
+Calculate inflation factors, find genome-wide significant results and top 10 SNPs with lowest p-values:
+```{r}
+meta <- read.table(file = paste0(path, "/meta_regenie.meta"), header=T)
+meta$SE <- abs(log(meta$OR)/qnorm(meta$P/2))
+
+#Calculate inflation factor
+inf <-  median(qchisq(meta$P, df=1, lower.tail = F))/0.4549
+
+#Find significant for table
+meta_sig <-meta %>% filter(P<5*10^-8)
+```
+
+## Run GWAS on HLA data:
+Prepare HLA data:
+```{bash, engine.opts='-l'}
+DIR=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData
+root=$DIR/postImp
+
+HLA=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/hla_imp
+OUT=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis
+
+module load plink2/2.00alpha20221024
+module load tools
+module load gcc
+module load intel/perflibs
+module load R/4.0.0
+
+#DRB1
+plink2 --vcf $HLA/IBDimp_X_unphased_related.hla_DRB1.vcf.gz --keep $DIR/cohort_information/UC_prognosis/Cohort_defined_geneID.txt --make-pgen --out $OUT/UC_HLA_DRB1
+
+plink2 --pfile $OUT/UC_HLA_DRB1 --recode vcf --out $OUT/UC_HLA_DRB1
+plink2 --vcf $OUT/UC_HLA_DRB1.vcf --make-pgen --id-delim "_" --out $OUT/UC_HLA_DRB1
+
+#DPB1
+plink2 --vcf $HLA/IBDimp_X_unphased_related.hla_DPB1.vcf.gz --keep $DIR/cohort_information/UC_prognosis/Cohort_defined_geneID.txt --make-pgen --out $OUT/UC_HLA_DPB1
+
+plink2 --pfile $OUT/UC_HLA_DPB1 --recode vcf --out $OUT/UC_HLA_DPB1
+plink2 --vcf $OUT/UC_HLA_DPB1.vcf --make-pgen --id-delim "_" --out $OUT/UC_HLA_DPB1
+
+#DQB1
+plink2 --vcf $HLA/IBDimp_X_unphased_related.hla_DQB1.vcf.gz --keep $DIR/cohort_information/UC_prognosis/Cohort_defined_geneID.txt --make-pgen --out $OUT/UC_HLA_DQB1
+
+plink2 --pfile $OUT/UC_HLA_DQB1 --recode vcf --out $OUT/UC_HLA_DQB1
+plink2 --vcf $OUT/UC_HLA_DQB1.vcf --make-pgen --id-delim "_" --out $OUT/UC_HLA_DQB1
+
+#C
+plink2 --vcf $HLA/IBDimp_X_unphased_related.hla_C.vcf.gz --keep $DIR/cohort_information/UC_prognosis/Cohort_defined_geneID.txt --make-pgen --out $OUT/UC_HLA_C
+
+plink2 --pfile $OUT/UC_HLA_C --recode vcf --out $OUT/UC_HLA_C
+plink2 --vcf $OUT/UC_HLA_C.vcf --make-pgen --id-delim "_" --out $OUT/UC_HLA_C
+
+#B
+plink2 --vcf $HLA/IBDimp_X_unphased_related.hla_B.vcf.gz --keep $DIR/cohort_information/UC_prognosis/Cohort_defined_geneID.txt --make-pgen --out $OUT/UC_HLA_B
+
+plink2 --pfile $OUT/UC_HLA_B --recode vcf --out $OUT/UC_HLA_B
+plink2 --vcf $OUT/UC_HLA_B.vcf --make-pgen --id-delim "_" --out $OUT/UC_HLA_B
+
+#A
+plink2 --vcf $HLA/IBDimp_X_unphased_related.hla_A.vcf.gz --keep $DIR/cohort_information/UC_prognosis/Cohort_defined_geneID.txt --make-pgen --out $OUT/UC_HLA_A
+
+plink2 --pfile $OUT/UC_HLA_A --recode vcf --out $OUT/UC_HLA_A
+plink2 --vcf $OUT/UC_HLA_A.vcf --make-pgen --id-delim "_" --out $OUT/UC_HLA_A
+
+#DQA1
+plink2 --vcf $HLA/IBDimp_X_unphased_related.hla_DQA1.vcf.gz --keep $DIR/cohort_information/UC_prognosis/Cohort_defined_geneID.txt --make-pgen --out $OUT/UC_HLA_DQA1
+
+plink2 --pfile $OUT/UC_HLA_DQA1 --recode vcf --out $OUT/UC_HLA_DQA1
+plink2 --vcf $OUT/UC_HLA_DQA1.vcf --make-pgen --id-delim "_" --out $OUT/UC_HLA_DQA1
+
+```
+
+Regenie Step 2:
+```{bash, engine.opts='-l'}
+
+DIR=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/postImp
+root=$DIR/IBD
+OUT=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis
+
+pheno1=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/PKU
+pheno2=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/NorDIBD
+
+keep1=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/Cohort_NBS.txt
+keep2=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/Cohort_nordibd.txt
+
+HLA=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/hla_imp
+
+module load regenie/4.3
+module load tools
+module load gcc
+module load intel/perflibs
+module load R/4.0.0
+
+#DRB1
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DRB1 \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NBS_pred.list \
+  --out $OUT/Regenie_step2_NBS_HLA_DRB1
+  
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DRB1 \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/Regenie_step2_NorDIBD_HLA_DRB1
+
+#DPB1
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DPB1 \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NBS_pred.list \
+  --out $OUT/Regenie_step2_NBS_HLA_DPB1
+  
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DPB1 \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/Regenie_step2_NorDIBD_HLA_DPB1
+
+#DQB1
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DQB1 \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NBS_pred.list \
+  --out $OUT/Regenie_step2_NBS_HLA_DQB1
+  
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DQB1 \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/Regenie_step2_NorDIBD_HLA_DQB1
+
+#DQA1
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DQA1 \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NBS_pred.list \
+  --out $OUT/Regenie_step2_NBS_HLA_DQA1
+  
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DQA1 \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/Regenie_step2_NorDIBD_HLA_DQA1
+
+#C
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_C \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NBS_pred.list \
+  --out $OUT/Regenie_step2_NBS_HLA_C
+  
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_C \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/Regenie_step2_NorDIBD_HLA_C
+
+#B
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_B \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NBS_pred.list \
+  --out $OUT/Regenie_step2_NBS_HLA_B
+  
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_B \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/Regenie_step2_NorDIBD_HLA_B
+
+#A
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_A \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NBS_pred.list \
+  --out $OUT/Regenie_step2_NBS_HLA_A
+  
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_A \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/Regenie_step2_NorDIBD_HLA_A
+
+```
+
+Prepare output for meta-analysis:
+Required: CHR, BP, SNP, A1, A2, P, OR, SE
+```{r}
+path <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis"
+#DRB1
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_HLA_DRB1_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_HLA_DRB1_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_HLA_DRB1_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_HLA_DRB1_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#DPB1
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_HLA_DPB1_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_HLA_DPB1_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_HLA_DPB1_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_HLA_DPB1_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#DQB1
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_HLA_DQB1_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_HLA_DQB1_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_HLA_DQB1_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_HLA_DQB1_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#DQA1
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_HLA_DQA1_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_HLA_DQA1_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_HLA_DQA1_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_HLA_DQA1_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#C
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_HLA_C_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_HLA_C_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_HLA_C_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_HLA_C_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#B
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_HLA_B_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_HLA_B_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_HLA_B_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_HLA_B_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#A
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_HLA_A_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_HLA_A_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_HLA_A_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_HLA_A_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+```
+
+
+Run meta-analyses using plink1.9:
+```{bash, engine.opts='-l'}
+
+OUT=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis
+
+
+module load plink2/1.90beta6.18
+module load tools
+module load gcc
+module load intel/perflibs
+module load R/4.0.0
+
+###############
+#Meta-analyses#
+###############
+
+#DRB1
+plink --meta-analysis $OUT/Regenie_step2_NBS_HLA_DRB1_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_HLA_DRB1_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_HLA_DRB1
+
+#DPB1
+plink --meta-analysis $OUT/Regenie_step2_NBS_HLA_DPB1_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_HLA_DPB1_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_HLA_DPB1
+
+#DQB1
+plink --meta-analysis $OUT/Regenie_step2_NBS_HLA_DQB1_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_HLA_DQB1_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_HLA_DQB1
+
+#DQA1
+plink --meta-analysis $OUT/Regenie_step2_NBS_HLA_DQA1_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_HLA_DQA1_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_HLA_DQA1
+
+#C
+plink --meta-analysis $OUT/Regenie_step2_NBS_HLA_C_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_HLA_C_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_HLA_C
+
+#B
+plink --meta-analysis $OUT/Regenie_step2_NBS_HLA_B_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_HLA_B_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_HLA_B
+
+#A
+plink --meta-analysis $OUT/Regenie_step2_NBS_HLA_A_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_HLA_A_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_HLA_A
+```
+
+
+## Investigate and plot results in R
+
+Read in libraries and pathways
+```{r}
+library(dplyr)
+library(ggplot2)
+library(qqman)
+library(ggpubr)
+
+path <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis"
+```
+
+Find genome-wide significant results:
+```{r}
+hla_imp <- c("DRB1", "DPB1", "DQB1", "DQA1", "C", "B", "A")
+meta <- data.frame()
+for (hla in hla_imp){
+  met <- read.table(file = paste0(path, "/meta_regenie_HLA_", hla, ".meta"), header=T)
+  meta <- rbind(meta, met)
+}
+
+meta_sig <- meta %>% filter(P<5*10^-8)
+
+```
+
+## GWAS conditioning on HLA-DRB1*01:03:
+Take out genotype of DRB1*01:03:
+```{bash, engine.opts='-l'}
+DIR=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData
+root=$DIR/postImp
+
+HLA=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/hla_imp
+OUT=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis
+
+module load plink2/2.00alpha20221024
+module load tools
+module load gcc
+module load intel/perflibs
+module load R/4.0.0
+
+#DRB1
+plink2 --pfile $OUT/UC_HLA_DRB1 --snp HLA-DRB1*01:03 --make-pgen --out $OUT/UC_conditional
+
+```
+
+Step 2:
+```{bash, engine.opts='-l'}
+
+DIR=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/postImp
+root=$DIR/IBD
+OUT=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output
+
+pheno1=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/PKU
+pheno2=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/NorDIBD
+
+keep1=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/Cohort_NBS.txt
+keep2=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/Cohort_nordibd.txt
+
+
+module load regenie/4.3
+module load tools
+module load gcc
+module load intel/perflibs
+module load R/4.0.0
+
+regenie \
+  --step 2 \
+  --pgen $DIR/tryoutUC \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --condition-file pgen,$OUT/UC_prognosis/UC_conditional \
+  --condition-list $OUT/UC_prognosis/condition_list.txt \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/UC_prognosis/Regenie_step1_NBS_pred.list \
+  --out $OUT/UC_prognosis/Regenie_NBS_conditional
+  
+regenie \
+  --step 2 \
+  --pgen $DIR/tryoutUC \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --condition-file pgen,$OUT/UC_prognosis/UC_conditional \
+  --condition-list $OUT/UC_prognosis/condition_list.txt \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --extract $DIR/snps_nordibdUC.snplist \
+  --pThresh 0.01 \
+  --pred $OUT/UC_prognosis/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/UC_prognosis/Regenie_NorDIBD_conditional
+
+
+```
+
+Prepare output for meta-analysis:
+Required: CHR, BP, SNP, A1, A2, P, OR, SE
+```{r}
+path <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis"
+
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_NBS_conditional_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_NBS_conditional_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+#rm(gwas_NBS)
+
+#NorDIBD
+gwas_nord <- read.table(file = paste0(path, "/Regenie_NorDIBD_conditional_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_NorDIBD_conditional_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+#rm(gwas_nord)
+
+```
+
+
+Run meta-analyses using plink1.9:
+```{bash, engine.opts='-l'}
+
+OUT=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis
+
+
+module load plink2/1.90beta6.18
+module load tools
+module load gcc
+module load intel/perflibs
+module load R/4.0.0
+
+###############
+#Meta-analyses#
+###############
+
+plink --meta-analysis $OUT/Regenie_NBS_conditional_outcome2_prep.regenie $OUT/Regenie_NorDIBD_conditional_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_conditional
+```
+
+
+## Investigate and plot results in R
+
+Read in libraries and pathways
+```{r}
+library(dplyr)
+library(ggplot2)
+library(qqman)
+library(ggpubr)
+
+path <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis"
+```
+
+Calculate inflation factors, find genome-wide significant results:
+```{r}
+meta <- read.table(file = paste0(path, "/meta_regenie_conditional.meta"), header=T)
+meta$SE <- abs(log(meta$OR)/qnorm(meta$P/2))
+
+
+#Calculate inflation factor
+inf <-  median(qchisq(meta$P, df=1, lower.tail = F))/0.4549
+
+#Find significant for table
+meta_sig <-meta %>% filter(P<5*10^-8)
+
+meta %>% filter(SNP=="rs144717024")
+```
+
+Extract DRB1*01:03 genotype for association tests:
+```{bash, engine.opts='-l'}
+#!/bin/bash
+
+DIR=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/UC_analysis
+OUT=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis
+module load plink2/2.00alpha20221024
+
+#Recode
+plink2 --pfile $OUT/UC_HLA_DRB1 --snp HLA-DRB1*01:03 --recode A --window 0  --out $OUT/snp_HLA
+
+```
+
+## Conditioning analysis on the HLA region:
+```{bash, engine.opts='-l'}
+
+DIR=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/postImp
+root=$DIR/IBD
+OUT=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis
+
+pheno1=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/NBS
+pheno2=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/NorDIBD
+
+keep1=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/Cohort_NBS.txt
+keep2=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis/Cohort_nordibd.txt
+
+HLA=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/hla_imp
+
+module load regenie/4.3
+module load tools
+module load gcc
+module load intel/perflibs
+module load R/4.0.0
+
+#DRB1
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DRB1 \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --condition-file pgen,$OUT/UC_conditional \
+  --condition-list $OUT/condition_list.txt \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NBS_pred.list \
+  --out $OUT/Regenie_step2_NBS_HLA_DRB1_cond
+  
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DRB1 \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --bsize 1000 \
+  --condition-file pgen,$OUT/UC_conditional \
+  --condition-list $OUT/condition_list.txt \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/Regenie_step2_NorDIBD_HLA_DRB1_cond
+
+#DPB1
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DPB1 \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --condition-file pgen,$OUT/UC_conditional \
+  --condition-list $OUT/condition_list.txt \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NBS_pred.list \
+  --out $OUT/Regenie_step2_NBS_HLA_DPB1_cond
+  
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DPB1 \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --bsize 1000 \
+  --condition-file pgen,$OUT/UC_conditional \
+  --condition-list $OUT/condition_list.txt \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/Regenie_step2_NorDIBD_HLA_DPB1_cond
+
+#DQB1
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DQB1 \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --condition-file pgen,$OUT/UC_conditional \
+  --condition-list $OUT/condition_list.txt \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NBS_pred.list \
+  --out $OUT/Regenie_step2_NBS_HLA_DQB1_cond
+  
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DQB1 \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --bsize 1000 \
+  --condition-file pgen,$OUT/UC_conditional \
+  --condition-list $OUT/condition_list.txt \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/Regenie_step2_NorDIBD_HLA_DQB1_cond
+
+#DQA1
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DQA1 \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --condition-file pgen,$OUT/UC_conditional \
+  --condition-list $OUT/condition_list.txt \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NBS_pred.list \
+  --out $OUT/Regenie_step2_NBS_HLA_DQA1_cond
+  
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DQA1 \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --bsize 1000 \
+  --condition-file pgen,$OUT/UC_conditional \
+  --condition-list $OUT/condition_list.txt \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/Regenie_step2_NorDIBD_HLA_DQA1_cond
+
+#C
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_C \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --condition-file pgen,$OUT/UC_conditional \
+  --condition-list $OUT/condition_list.txt \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NBS_pred.list \
+  --out $OUT/Regenie_step2_NBS_HLA_C_cond
+  
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_C \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --bsize 1000 \
+  --condition-file pgen,$OUT/UC_conditional \
+  --condition-list $OUT/condition_list.txt \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/Regenie_step2_NorDIBD_HLA_C_cond
+
+#B
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_B \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --condition-file pgen,$OUT/UC_conditional \
+  --condition-list $OUT/condition_list.txt \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NBS_pred.list \
+  --out $OUT/Regenie_step2_NBS_HLA_B_cond
+  
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_B \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --bsize 1000 \
+  --condition-file pgen,$OUT/UC_conditional \
+  --condition-list $OUT/condition_list.txt \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/Regenie_step2_NorDIBD_HLA_B_cond
+
+#A
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_A \
+  --covarFile $pheno1/Analysis_file_NBS_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno1/Analysis_file_NBS_phe.csv \
+  --keep $keep1 \
+  --bsize 1000 \
+  --condition-file pgen,$OUT/UC_conditional \
+  --condition-list $OUT/condition_list.txt \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NBS_pred.list \
+  --out $OUT/Regenie_step2_NBS_HLA_A_cond
+  
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_A \
+  --covarFile $pheno2/Analysis_file_NorDIBD_cov.csv \
+  --catCovarList sex \
+  --phenoFile $pheno2/Analysis_file_NorDIBD_phe.csv \
+  --keep $keep2 \
+  --bsize 1000 \
+  --condition-file pgen,$OUT/UC_conditional \
+  --condition-list $OUT/condition_list.txt \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_NorDIBD_pred.list \
+  --out $OUT/Regenie_step2_NorDIBD_HLA_A_cond
+
+```
+
+Prepare output for meta-analysis:
+Required: CHR, BP, SNP, A1, A2, P, OR, SE
+```{r}
+path <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis"
+#DRB1
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_HLA_DRB1_cond_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_HLA_DRB1_cond_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_HLA_DRB1_cond_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_HLA_DRB1_cond_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#DPB1
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_HLA_DPB1_cond_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_HLA_DPB1_cond_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_HLA_DPB1_cond_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P))
+gwas_nord <- gwas_nord %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_HLA_DPB1_cond_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#DQB1
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_HLA_DQB1_cond_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_HLA_DQB1_cond_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_HLA_DQB1_cond_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_HLA_DQB1_cond_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#DQA1
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_HLA_DQA1_cond_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_HLA_DQA1_cond_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_HLA_DQA1_cond_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_HLA_DQA1_cond_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#C
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_HLA_C_cond_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P))%>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_HLA_C_cond_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_HLA_C_cond_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_HLA_C_cond_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#B
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_HLA_B_cond_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_HLA_B_cond_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_HLA_B_cond_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_HLA_B_cond_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+#A
+gwas_NBS <- read.table(file = paste0(path, "/Regenie_step2_NBS_HLA_A_cond_outcome2.regenie"), header=T)
+gwas_NBS <- gwas_NBS %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_NBS) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_NBS <- gwas_NBS %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_NBS,  paste0(path, "/Regenie_step2_NBS_HLA_A_cond_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+gwas_nord <- read.table(file = paste0(path, "/Regenie_step2_NorDIBD_HLA_A_cond_outcome2.regenie"), header=T)
+gwas_nord <- gwas_nord %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas_nord) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas_nord <- gwas_nord %>% mutate(P = 10^(-LOG10P)) %>%select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+write.table(gwas_nord,  paste0(path, "/Regenie_step2_NorDIBD_HLA_A_cond_outcome2_prep.regenie"), sep=" ", col.names=T, quote=F, row.names=F)
+
+```
+
+
+Run meta-analyses using plink1.9:
+```{bash, engine.opts='-l'}
+
+OUT=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis
+
+
+module load plink2/1.90beta6.18
+module load tools
+module load gcc
+module load intel/perflibs
+module load R/4.0.0
+
+###############
+#Meta-analyses#
+###############
+
+#DRB1
+plink --meta-analysis $OUT/Regenie_step2_NBS_HLA_DRB1_cond_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_HLA_DRB1_cond_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_HLA_DRB1_cond
+
+#DPB1
+plink --meta-analysis $OUT/Regenie_step2_NBS_HLA_DPB1_cond_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_HLA_DPB1_cond_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_HLA_DPB1_cond
+
+#DQB1
+plink --meta-analysis $OUT/Regenie_step2_NBS_HLA_DQB1_cond_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_HLA_DQB1_cond_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_HLA_DQB1_cond
+
+#DQA1
+plink --meta-analysis $OUT/Regenie_step2_NBS_HLA_DQA1_cond_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_HLA_DQA1_cond_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_HLA_DQA1_cond
+
+#C
+plink --meta-analysis $OUT/Regenie_step2_NBS_HLA_C_cond_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_HLA_C_cond_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_HLA_C_cond
+
+#B
+plink --meta-analysis $OUT/Regenie_step2_NBS_HLA_B_cond_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_HLA_B_cond_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_HLA_B_cond
+
+#A
+plink --meta-analysis $OUT/Regenie_step2_NBS_HLA_A_cond_outcome2_prep.regenie $OUT/Regenie_step2_NorDIBD_HLA_A_cond_outcome2_prep.regenie + logscale --out $OUT/meta_regenie_HLA_A_cond
+```
+
+
+## Investigate and plot results in R
+
+Read in libraries and pathways
+```{r}
+library(dplyr)
+library(ggplot2)
+library(qqman)
+library(ggpubr)
+
+path <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis"
+```
+
+Calculate inflation factors, find genome-wide significant results:
+```{r}
+hla_imp <- c("DRB1", "DPB1", "DQB1", "DQA1", "C", "B", "A")
+meta <- data.frame()
+for (hla in hla_imp){
+  met <- read.table(file = paste0(path, "/meta_regenie_HLA_", hla, "_cond.meta"), header=T)
+  meta <- rbind(meta, met)
+}
+meta %>% arrange(P) %>% head()
+meta_sig <- meta %>% filter(P<5*10^-8)
+
+```
+
+## Rerun analyses separately for the different outcome criteria for the HLA variant:
+
+Make files:
+```{r}
+cohort <- read.csv(file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/Phenotype_file_v2.csv"), sep=" ", header=T) 
+cohort$lbnr <- as.character(cohort$lbnr)
+cohort <- cohort %>% mutate(year = year(diag_date))
+cohort <- cohort %>% rename(IID =lbnr)
+cohort <- left_join(cohort, ids, by="IID")
+
+#Generate binary outcomes - excluding other types of cases from the controls:
+cohort <- cohort %>% mutate(hosp = ifelse(outcome1a>=2, 1, 0), surg = ifelse(outcome1b>=1, 1, 0), cortico = ifelse(outcome1c>=5000, 1, 0))
+
+#Subset cohorts
+#This removes controls, that are not controls in original analysis
+cohort_hosp <- cohort %>% filter(hosp==1 | (hosp==0 & outcome2==1) )
+cohort_surg <- cohort %>% filter((surg==0 & outcome2==1) | surg==1)
+cohort_cortico <- cohort %>% filter((cortico==0 & outcome2==1) | cortico==1)
+
+table(cohort_hosp$hosp)
+table(cohort_surg$surg)
+table(cohort_cortico$cortico)
+
+#Save files for analysis
+write.table(cohort_hosp %>% select(FID, IID), file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/Cohort_hosp.txt"), sep=" ", col.names=T, quote=F, row.names=F)
+write.table(cohort_surg %>% select(FID, IID), file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/Cohort_surg.txt"), sep=" ", col.names=T, quote=F, row.names=F)
+write.table(cohort_cortico %>% select(FID, IID), file = paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/Cohort_cortico.txt"), sep=" ", col.names=T, quote=F, row.names=F)
+```
+
+Step 1 and 2:
+```{bash, engine.opts='-l'}
+
+DIR=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/postImp
+root=$DIR/IBD
+OUT1=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output
+
+OUT=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis
+
+pheno=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis
+
+
+keep=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/cohort_information/UC_prognosis
+
+HLA=/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/GeneratedData/hla_imp
+
+
+module load regenie/4.3
+module load tools
+module load gcc
+module load intel/perflibs
+module load R/4.0.0
+
+#Hosp
+regenie \
+  --step 1 \
+  --pgen $OUT1/Regenie_step1_prep \
+  --covarFile $pheno/Analysis_file_cov_sep_bin.csv \
+  --catCovarList sex,cohort \
+  --phenoFile $pheno/Analysis_file_phe_sep_bin.csv --phenoCol hosp \
+  --keep $keep/Cohort_hosp.txt \
+  --bsize 1000 \
+  --bt \
+  --out $OUT1/UC_prognosis/Regenie_step1_hosp
+  
+
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DRB1 \
+  --covarFile $pheno/Analysis_file_cov_sep_bin.csv \
+  --catCovarList sex,cohort \
+  --phenoFile $pheno/Analysis_file_phe_sep_bin.csv  --phenoCol hosp \
+  --keep $keep/Cohort_hosp.txt \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_hosp_pred.list \
+  --out $OUT/Regenie_step2_HLA_DRB1_hosp
+
+#Surg
+regenie \
+  --step 1 \
+  --pgen $OUT1/Regenie_step1_prep \
+  --covarFile $pheno/Analysis_file_cov_sep_bin.csv \
+  --catCovarList sex,cohort \
+  --phenoFile $pheno/Analysis_file_phe_sep_bin.csv --phenoCol surg \
+  --keep $keep/Cohort_surg.txt \
+  --bsize 1000 \
+  --bt \
+  --out $OUT1/UC_prognosis/Regenie_step1_surg
+  
+
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DRB1 \
+  --covarFile $pheno/Analysis_file_cov_sep_bin.csv \
+  --catCovarList sex,cohort \
+  --phenoFile $pheno/Analysis_file_phe_sep_bin.csv  --phenoCol surg \
+  --keep $keep/Cohort_surg.txt \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_surg_pred.list \
+  --out $OUT/Regenie_step2_HLA_DRB1_surg
+
+
+#cortico
+regenie \
+  --step 1 \
+  --pgen $OUT1/Regenie_step1_prep \
+  --covarFile $pheno/Analysis_file_cov_sep_bin.csv \
+  --catCovarList sex,cohort \
+  --phenoFile $pheno/Analysis_file_phe_sep_bin.csv --phenoCol cortico \
+  --keep $keep/Cohort_cortico.txt \
+  --bsize 1000 \
+  --bt \
+  --out $OUT1/UC_prognosis/Regenie_step1_cortico
+  
+
+regenie \
+  --step 2 \
+  --pgen $OUT/UC_HLA_DRB1 \
+  --covarFile $pheno/Analysis_file_cov_sep_bin.csv \
+  --catCovarList sex,cohort \
+  --phenoFile $pheno/Analysis_file_phe_sep_bin.csv  --phenoCol cortico \
+  --keep $keep/Cohort_cortico.txt \
+  --bsize 1000 \
+  --bt \
+  --firth \
+  --pThresh 0.01 \
+  --pred $OUT/Regenie_step1_cortico_pred.list \
+  --out $OUT/Regenie_step2_HLA_DRB1_cortico
+
+```
+

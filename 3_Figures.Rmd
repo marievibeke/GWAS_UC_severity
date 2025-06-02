@@ -1,0 +1,373 @@
+---
+title: "Untitled"
+output: html_document
+date: "2023-08-24"
+editor_options: 
+  chunk_output_type: console
+---
+
+Author: Marie Vibeke Vestergaard
+
+This document generates figures for the manuscript
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library( tidyverse )
+library( grid )
+library( forestploter )
+library( officer )
+library( rvg )
+library(gt)
+library(ggh4x)
+library(lubridate)
+library(survminer)
+library(survival)
+packageVersion("forestploter")
+packageVersion("survival")
+packageVersion("ggplot2")
+packageVersion("survminer")
+library(ggplot2)
+
+
+path_UC <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/UC_prognosis"
+path_project <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD"
+
+project_colors   <- c("#009E73", "palegreen", "deeppink3", "#CC79A7", "#0072B2", "#56B4E9", "#E69F00", "#F0E442", "#999999")
+
+```
+
+
+## Figure 1 for DRB1 letter
+
+```{r}
+########## OR table: 
+pheno_UC <- read.csv(paste0(path_project, "/GeneratedData/cohort_information/UC_prognosis/Phenotype_file_v2.csv"), sep=" ")
+colnames(pheno_UC)[1] <- "IID" 
+snp_UC <- read.table(paste0(path_UC, "/snp_HLA.raw"), header=T) %>% dplyr::select(IID, HLA.DRB1.01.03_A)
+snp_UC$IID <- as.character(snp_UC$IID)
+pheno_UC$IID <- as.character(pheno_UC$IID)
+snp_UC <- left_join(pheno_UC, snp_UC, by="IID")
+
+snp_UC <- snp_UC %>% mutate(hosp = ifelse(outcome1a>=2, 1, 0), surg = ifelse(outcome1b>=1, 1, 0), cortico = ifelse(outcome1c>=5000, 1, 0))
+
+cohort_hosp <- snp_UC %>% filter(hosp==1 | (hosp==0 & outcome2==1) )
+cohort_surg <- snp_UC %>% filter((surg==0 & outcome2==1) | surg==1)
+cohort_cortico <- snp_UC %>% filter((cortico==0 & outcome2==1) | cortico==1)
+
+table(cohort_hosp[, c("hosp", "HLA.DRB1.01.03_A")])
+table(cohort_surg[, c("surg", "HLA.DRB1.01.03_A")])
+table(cohort_cortico[, c("cortico", "HLA.DRB1.01.03_A")])
+
+
+main <- data.frame(Outcomes = "Primary analysis", pop_car = dim(snp_UC%>%filter(outcome2==2))[1], event_car = dim(snp_UC%>%filter(outcome2==2)%>%filter(HLA.DRB1.01.03_A==1))[1], pop_non = dim(snp_UC%>%filter(outcome2!=2))[1], event_non = dim(snp_UC%>%filter(outcome2!=2)%>%filter(HLA.DRB1.01.03_A==1))[1])
+
+cortico <- data.frame(Outcomes = "≥5000 mg corticosteroids", pop_car = dim(snp_UC%>%filter(outcome1c>=5000))[1], event_car = dim(snp_UC%>%filter(outcome1c>=5000)%>%filter(HLA.DRB1.01.03_A==1))[1], pop_non = dim(snp_UC%>%filter(outcome2!=2))[1], event_non = dim(snp_UC%>%filter(outcome2!=2)%>%filter(HLA.DRB1.01.03_A==1))[1])
+
+hosp <- data.frame(Outcomes = "≥2 hospitalizations", pop_car = dim(snp_UC%>%filter(outcome1a>=2))[1], event_car = dim(snp_UC%>%filter(outcome1a>=2)%>%filter(HLA.DRB1.01.03_A==1))[1], pop_non = dim(snp_UC%>%filter(outcome2!=2))[1], event_non = dim(snp_UC%>%filter(outcome2!=2)%>%filter(HLA.DRB1.01.03_A==1))[1])
+
+surg <- data.frame(Outcomes = "≥1 major surgeries", pop_car = dim(snp_UC%>%filter(outcome1b>=1))[1], event_car = dim(snp_UC%>%filter(outcome1b>=1)%>%filter(HLA.DRB1.01.03_A==1))[1], pop_non = dim(snp_UC%>%filter(outcome2!=2))[1], event_non = dim(snp_UC%>%filter(outcome2!=2)%>%filter(HLA.DRB1.01.03_A==1))[1])
+
+df_plot <- rbind(main, cortico, hosp, surg)
+df_plot <- df_plot %>% mutate(n_N_car = round((event_car/pop_car)*100, digits=1), n_N_non = round((event_non/pop_non)*100, digits=1))
+
+df_plot <- df_plot %>% mutate(event_car_proc = paste0(event_car, " (", n_N_car, ")"), event_non_proc = paste0(event_non, " (", n_N_non, ")"))
+
+#Add OR, CI, P:
+vars <- c("cortico_cortico","hosp_hosp", "surg_surg")
+df <- data.frame()
+for (i in 1:length(vars)){
+  gwas <- read.table(file = paste0(path_UC, "/Regenie_step2_HLA_DRB1_", vars[i],".regenie"), header=T)
+gwas <- gwas %>% select(CHROM, GENPOS, ID, ALLELE0, ALLELE1, BETA, SE, LOG10P)
+colnames(gwas) <- c("CHR", "BP", "SNP", "A1", "A2", "BETA", "SE", "LOG10P")
+gwas <- gwas %>% mutate(P = 10^(-LOG10P)) %>% select(CHR, SNP, BP, A1, A2, P, BETA, SE)
+gwas <- gwas %>% filter(SNP == "HLA-DRB1*01:03")
+df <- rbind(df,gwas)
+}
+
+df <- df %>% select(BETA, SE, P) %>% mutate(OR = exp(BETA), CI_lower = exp(BETA-1.96*SE), CI_higher = exp(BETA+1.96*SE))  %>% select(-BETA)
+
+#Add main analysis results:
+main <- read.table(file = paste0(path_UC, "/meta_regenie_HLA_DRB1.meta"), header=T) %>% filter(SNP=="HLA-DRB1*01:03")
+main$SE <- abs(log(main$OR)/qnorm(main$P/2))
+main <- main %>% mutate(CI_lower = exp(log(OR) -1.96*SE), CI_higher = exp(log(OR) +1.96*SE))
+df <- rbind(data.frame(SE = main$SE, P = main$P, OR = main$OR, CI_lower = main$CI_lower, CI_higher = main$CI_higher), df)
+df$"OR [95% CI]" <- paste0(formatC(df$OR, 2, format = "f"), " [", formatC(df$CI_lower, 2, format = "f"), " - ", formatC(df$CI_higher, 2, format = "f"), "]")
+
+#JAMA formatted P-values:
+df$P <- ifelse(df$P < 0.001, "<.001", df$P)
+df[2, "P"] <- ".001"
+
+df_plot$plot.column <- "                            "
+df_plot <- cbind(df_plot, df %>% select(OR, CI_lower, CI_higher, "OR [95% CI]", P))
+
+dt_fig <- df_plot %>% select(Outcomes, pop_car, event_car_proc, pop_non, event_non_proc, plot.column, "OR [95% CI]", P)
+colnames(dt_fig) <- c("Outcome", "Population", "Carriers (%)","Population", "Carriers (%)", "", "OR [95% CI]", "P")
+
+fig1_a <- forest(dt_fig, est=df_plot$OR, lower=df_plot$CI_lower, upper=df_plot$CI_higher, ci_column = 6, sizes=0.5, x_trans="log10", xlim=c(0.5,16), ticks_at = c(0.5,1,2,5,10), theme=forest_theme(base_size = 8, base_family = "sans"), xlab="               OR [95% CI]")
+
+fig1_a <- insert_text(fig1_a, text = "Event",
+              part = "header", 
+              row = 1,
+              col = 2:3,
+              gp = gpar(fontface = "bold", fontsize=10))
+fig1_a <- add_text(fig1_a, text = "No event",
+              part = "header", 
+              row = 1,
+              col = 4:5,
+              gp = gpar(fontface = "bold", fontsize=10))
+
+fig1_a <- edit_plot(fig1_a, 
+               row = 1, 
+               which = "background", 
+               gp = gpar(fill = project_colors[1], alpha=0.1))
+fig1_a <- edit_plot(fig1_a, 
+               row = 2, 
+               which = "background", 
+               gp = gpar(fill = project_colors[3], alpha=0.1))
+fig1_a <- edit_plot(fig1_a, 
+               row = 3, 
+               which = "background", 
+               gp = gpar(fill = project_colors[5], alpha=0.1))
+fig1_a <- edit_plot(fig1_a, 
+               row = 4, 
+               which = "background", 
+               gp = gpar(fill = project_colors[7], alpha=0.1))
+fig1_a <- add_border(fig1_a, 
+                part = "header", 
+                row = 2,
+                gp = gpar(lwd = 1))
+fig1_a <- add_border(fig1_a, 
+                part = "body", 
+                col = c(2,4,6), where="left",
+                gp = gpar(lwd = 1))
+
+
+############# HR table
+
+path_prs <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/PRS"
+snp_UC <- read.table(paste0(path_prs, "/snp_DRB1_all.raw"), header=T) %>% dplyr::select(IID, HLA.DRB1.01.03_A) %>% rename(IIDnew=IID)
+
+#Cortico
+df_sub <- read.csv( paste0(path_project, "/GeneratedData/cohort_information/Time_to_cortico_IBD.txt"), sep=";")
+time_500 <- df_sub%>% filter(final_diag%in%c("UC", "UC_unc")) %>% mutate(event = ifelse(is.na(first_500), 0, 1), t = ifelse(is.na(first_500), as.numeric(as.Date(cens)-as.Date(diag_date)), as.numeric(as.Date(first_500)-as.Date(diag_date))))
+colnames(time_500)[2] <- "IID" 
+time_500 <- left_join(time_500, snp_UC, by="IIDnew")
+time_500$HLA <- ifelse(round(time_500$HLA.DRB1.01.03_A)==1, "Carrier", "Non-carrier")
+time_500$HLA <- factor(time_500$HLA, levels = c("Non-carrier", "Carrier")) 
+
+coxph(Surv(t, event) ~ HLA+sex+diag_age+cohort+diag_year, data=time_500)
+broom::tidy(coxph(Surv(t, event) ~ HLA+sex+diag_age+cohort+diag_year, data=time_500), exponentiate = TRUE, conf.int = TRUE)
+
+df_plot2 <- data.frame(outcome="Corticosteroids use      ", events_car = sum(time_500 %>% filter(HLA=="Carrier")%>%select(event)), py_car = sum(time_500 %>% filter(HLA=="Carrier")%>% select(t))/365.24, events_non = sum(time_500 %>% filter(HLA!="Carrier")%>%select(event)), py_non = sum(time_500 %>% filter(HLA!="Carrier")%>% select(t))/365.24, HR = 1.69, CI_low = 1.38, CI_up=2.07, P="<.001")
+
+#Hosp
+df_sub <- read.csv(paste0(path_project, "/GeneratedData/cohort_information/Time_to_surg_hosp_IBD.txt"), sep=";")
+time_hosp <- df_sub%>% filter(final_diag%in%c("UC", "UC_unc")) %>% mutate(event = ifelse(is.na(first_hosp), 0, 1), t = ifelse(is.na(first_hosp), as.numeric(as.Date(cens)-as.Date(diag_date)), as.numeric(as.Date(first_hosp)-as.Date(diag_date))))
+cens <- time_hosp %>% filter(diag_date>= as.Date("2019-09-01"))
+colnames(time_hosp)[2] <- "IID" 
+time_hosp <- left_join(time_hosp, snp_UC, by="IIDnew")
+time_hosp$HLA <- ifelse(round(time_hosp$HLA.DRB1.01.03_A)==1, "Carrier", "Non-carrier")
+time_hosp$HLA <- factor(time_hosp$HLA, levels = c("Non-carrier", "Carrier")) 
+
+coxph(Surv(t, event) ~ HLA+sex+diag_age+cohort+diag_year, data=time_hosp)
+broom::tidy(coxph(Surv(t, event) ~ HLA+sex+diag_age+cohort+diag_year, data=time_hosp), exponentiate = TRUE, conf.int = TRUE)
+
+df_plot2 <- rbind(df_plot2, data.frame(outcome="Hospitalization", events_car = sum(time_hosp %>% filter(HLA=="Carrier")%>%select(event)), py_car = sum(time_hosp %>% filter(HLA=="Carrier")%>% select(t))/365.24, events_non = sum(time_hosp %>% filter(HLA!="Carrier")%>%select(event)), py_non = sum(time_hosp %>% filter(HLA!="Carrier")%>% select(t))/365.24, HR = 2.22, CI_low = 1.79, CI_up=2.74, P="<.001"))
+
+#Surg
+time_surg <- df_sub%>% filter(final_diag%in%c("UC", "UC_unc")) %>% mutate(event = ifelse(is.na(first_surg), 0, 1), t = ifelse(is.na(first_surg), as.numeric(as.Date(cens)-as.Date(diag_date)), as.numeric(as.Date(first_surg)-as.Date(diag_date))))
+colnames(time_surg)[2] <- "IID" 
+time_surg <- left_join(time_surg, snp_UC, by="IIDnew")
+time_surg$HLA <- ifelse(round(time_surg$HLA.DRB1.01.03_A)==1, "Carrier", "Non-carrier")
+time_surg$HLA <- factor(time_surg$HLA, levels = c("Non-carrier", "Carrier")) 
+
+coxph(Surv(t, event) ~ HLA+sex+diag_age+cohort+diag_year, data=time_surg)
+broom::tidy(coxph(Surv(t, event) ~ HLA+sex+diag_age+cohort+diag_year, data=time_surg), exponentiate = TRUE, conf.int = TRUE)
+
+df_plot2 <- rbind(df_plot2, data.frame(outcome="Major surgery", events_car = sum(time_surg %>% filter(HLA=="Carrier")%>%select(event)), py_car = sum(time_surg %>% filter(HLA=="Carrier")%>% select(t))/365.24, events_non = sum(time_surg %>% filter(HLA!="Carrier")%>%select(event)), py_non = sum(time_surg %>% filter(HLA!="Carrier")%>% select(t))/365.24, HR = 5.13, CI_low = 3.86, CI_up=6.81, P="<.001"))
+                  
+df_plot2 <- df_plot2 %>% mutate(IR_car = round((events_car/py_car)*1000), IR_non = round((events_non/py_non)*1000), "HR [95% CI]" = paste0(HR, " [", CI_low, " - ", CI_up, "]"), py_car = round(py_car), py_non = round(py_non))
+
+df_plot2$plot.column <- "                            "
+
+dt_fig <- df_plot2 %>% select(outcome, events_car, py_car, IR_car, events_non, py_non, IR_non, plot.column, "HR [95% CI]", P)
+colnames(dt_fig) <- c("Outcome                           ", "Events   ", "PY     ", "IR       ", "Events   ", "PY     ", "IR       ", "", "HR [95% CI]", "P")
+
+fig1_b <- forest(dt_fig, est=df_plot2$HR, lower=df_plot2$CI_low, upper=df_plot2$CI_up, ci_column = 8, sizes=0.5, x_trans="log10", xlim=c(0.5,16), ticks_at = c(0.5,1,2,5,10), theme=forest_theme(base_size = 8, base_family = "sans"), xlab="               HR [95% CI]")
+fig1_b <- insert_text(fig1_b, text = "Carriers",
+              part = "header", 
+              row = 1,
+              col = 2:4,
+              gp = gpar(fontface = "bold", fontsize=10))
+fig1_b <- add_text(fig1_b, text = "Non-carriers",
+              part = "header", 
+              row = 1,
+              col = 5:7,
+              gp = gpar(fontface = "bold", fontsize=10))
+
+fig1_b <- edit_plot(fig1_b, 
+               row = 1, 
+               which = "background", 
+               gp = gpar(fill = project_colors[3], alpha=0.1))
+fig1_b <- edit_plot(fig1_b, 
+               row = 2, 
+               which = "background", 
+               gp = gpar(fill = project_colors[5], alpha=0.1))
+fig1_b <- edit_plot(fig1_b, 
+               row = 3, 
+               which = "background", 
+               gp = gpar(fill = project_colors[7], alpha=0.1))
+fig1_b <- add_border(fig1_b, 
+                part = "header", 
+                row = 2,
+                gp = gpar(lwd = 1))
+fig1_b <- add_border(fig1_b, 
+                part = "body", 
+                col = c(2,5,8), where="left",
+                gp = gpar(lwd = 1))
+
+
+f <- ggarrange(fig1_a, fig1_b, nrow=2, labels=c("A)", "B)"), font.label = list(size=10, family="sans"))
+ggsave(f, file = "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/illustrations/Figure1_letter_v2.pdf", width = 200, height = 110, units = "mm", dpi = 400, bg="white")
+```
+
+
+## Figure 2 for DRB1 letter:
+```{r}
+
+df_sub <- read.csv(paste0(path_project, "/GeneratedData/cohort_information/Time_to_surg_hosp_IBD.txt"), sep=";")
+
+#Make time to event (cens/hosp) for UC
+time_hosp <- df_sub%>% filter(final_diag%in%c("UC", "UC_unc")) %>% mutate(event = ifelse(is.na(first_hosp), 0, 1), t = ifelse(is.na(first_hosp), as.numeric(as.Date(cens)-as.Date(diag_date)), as.numeric(as.Date(first_hosp)-as.Date(diag_date))))
+cens <- time_hosp %>% filter(diag_date>= as.Date("2019-09-01"))
+
+colnames(time_hosp)[2] <- "IID" 
+path_prs <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/PRS"
+snp_UC <- read.table(paste0(path_prs, "/snp_DRB1_all.raw"), header=T) %>% dplyr::select(IID, HLA.DRB1.01.03_A) %>% rename(IIDnew=IID)
+
+time_hosp <- left_join(time_hosp, snp_UC, by="IIDnew")
+time_hosp$HLA <- ifelse(round(time_hosp$HLA.DRB1.01.03_A)==1, "Carrier", "Non-carrier")
+time_hosp$HLA <- factor(time_hosp$HLA, levels = c("Non-carrier", "Carrier")) 
+
+coxph(Surv(t, event) ~ HLA+sex+diag_age+cohort+diag_year, data=time_hosp)
+broom::tidy(coxph(Surv(t, event) ~ HLA+sex+diag_age+cohort+diag_year, data=time_hosp), exponentiate = TRUE, conf.int = TRUE)
+
+time_hosp$HLA <- factor(time_hosp$HLA, levels = c("Carrier", "Non-carrier")) 
+
+fit <- survfit(Surv(t, event) ~ HLA, data = time_hosp)
+
+f1 <- ggsurvplot(
+  fit,fun="event",
+  data = time_hosp,
+  size = 1,                 # change line size
+  palette =c(project_colors[6], project_colors[5]),
+  conf.int = TRUE,          # Add confidence interval
+  pval = F, legend="right",            # Add p-value
+  risk.table = TRUE,        # Add risk table
+  fontsize=2.5, legend.labs=c("Carrier", "Non-carrier"), 
+  #risk.table.col = "strata",# Risk table color by groups
+  risk.table.height = 0.25, # Useful to change when you have multiple groups
+  risk.table.title="",
+  ggtheme = theme_survminer(font.main=c(8, "plain", "black"), font.x=c(8, "plain", "black"), font.y=c(8, "plain", "black"), font.tickslab=c(8, "plain", "black"), font.legend=c(8, "plain", "black")),
+    xlim = c(0,3100), xlab = "Days since diagnosis", break.time.by = 600, font.family="sans", ylab="Cumulative incidence of hospitalization", axes.offset=F, ylim=c(0,0.8), censor=F)
+
+f1$table$theme$axis.text.y$colour <- "black"
+
+f1$table <- f1$table +theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.line.y = element_blank(), axis.line.x = element_blank(), axis.ticks.y=element_blank())
+
+
+#Make time to event (cens/surg) for UC
+time_surg <- df_sub%>% filter(final_diag%in%c("UC", "UC_unc")) %>% mutate(event = ifelse(is.na(first_surg), 0, 1), t = ifelse(is.na(first_surg), as.numeric(as.Date(cens)-as.Date(diag_date)), as.numeric(as.Date(first_surg)-as.Date(diag_date))))
+colnames(time_surg)[2] <- "IID" 
+
+time_surg <- left_join(time_surg, snp_UC, by="IIDnew")
+time_surg$HLA <- ifelse(round(time_surg$HLA.DRB1.01.03_A)==1, "Carrier", "Non-carrier")
+time_surg$HLA <- factor(time_surg$HLA, levels = c("Non-carrier", "Carrier")) 
+
+coxph(Surv(t, event) ~ HLA+sex+diag_age+cohort+diag_year, data=time_surg)
+broom::tidy(coxph(Surv(t, event) ~ HLA+sex+diag_age+cohort+diag_year, data=time_surg), exponentiate = TRUE, conf.int = TRUE)
+
+time_surg$HLA <- factor(time_surg$HLA, levels = c("Carrier", "Non-carrier")) 
+
+fit <- survfit(Surv(t, event) ~ HLA , data = time_surg)
+
+f2 <- ggsurvplot(
+  fit,fun="event",
+  data = time_surg,
+  size = 1,                 # change line size
+  palette =c(project_colors[8], project_colors[7]),
+  conf.int = TRUE,          # Add confidence interval
+  pval = F,              # Add p-value
+  risk.table = TRUE,        # Add risk table
+  fontsize=2.5, legend="right",
+  risk.table.title="",axes.offset=F,legend.labs=c("Carrier", "Non-carrier"),
+  #risk.table.col = "strata",# Risk table color by groups
+  risk.table.height = 0.25, # Useful to change when you have multiple groups
+  ggtheme = theme_survminer(font.main=c(8, "plain", "black"), font.x=c(8, "plain", "black"), font.y=c(8, "plain", "black"), font.tickslab=c(8, "plain", "black"), font.legend=c(8, "plain", "black")),
+    xlim = c(0,3100), xlab = "Days since diagnosis", break.time.by = 600, font.family="sans", ylab="Cumulative incidence of major surgery", ylim=c(0,0.8), censor=F)
+
+f2$table$theme$axis.text.y$colour <- "black"
+
+f2$table <- f2$table +theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.line.y = element_blank(), axis.line.x = element_blank(), axis.ticks.y=element_blank())
+
+
+#Use of corticosteroids (500):
+df_sub <- read.csv( paste0(path_project, "/GeneratedData/cohort_information/Time_to_cortico_IBD.txt"), sep=";")
+
+time_500 <- df_sub%>% filter(final_diag%in%c("UC", "UC_unc")) %>% mutate(event = ifelse(is.na(first_500), 0, 1), t = ifelse(is.na(first_500), as.numeric(as.Date(cens)-as.Date(diag_date)), as.numeric(as.Date(first_500)-as.Date(diag_date))))
+
+colnames(time_500)[2] <- "IID" 
+path_prs <- "/ngc/projects2/predict_r/research/projects/0007_Genetics_SNP_QC_IMP_PKU_NordIBD/Output/PRS"
+snp_UC <- read.table(paste0(path_prs, "/snp_DRB1_all.raw"), header=T) %>% dplyr::select(IID, HLA.DRB1.01.03_A) %>% rename(IIDnew=IID)
+
+time_500 <- left_join(time_500, snp_UC, by="IIDnew")
+time_500$HLA <- ifelse(round(time_500$HLA.DRB1.01.03_A)==1, "Carrier", "Non-carrier")
+time_500$HLA <- factor(time_500$HLA, levels = c("Non-carrier", "Carrier")) 
+
+coxph(Surv(t, event) ~ HLA+sex+diag_age+cohort+diag_year, data=time_500)
+broom::tidy(coxph(Surv(t, event) ~ HLA+sex+diag_age+cohort+diag_year, data=time_500), exponentiate = TRUE, conf.int = TRUE)
+
+time_500$HLA <- factor(time_500$HLA, levels = c("Carrier", "Non-carrier")) 
+
+fit <- survfit(Surv(t, event) ~ HLA, data = time_500)
+
+f3 <- ggsurvplot(
+  fit,fun="event",
+  data = time_500,
+  size = 1,                 # change line size
+  palette =c(project_colors[4], project_colors[3]),
+  conf.int = TRUE,          # Add confidence interval
+  pval = F, legend="right",            # Add p-value
+  risk.table = TRUE,        # Add risk table
+  fontsize=2.5, legend.labs=c("Carrier", "Non-carrier"), 
+  #risk.table.col = "strata",# Risk table color by groups
+  risk.table.height = 0.25, # Useful to change when you have multiple groups
+  risk.table.title="",
+  ggtheme = theme_survminer(font.main=c(8, "plain", "black"), font.x=c(8, "plain", "black"), font.y=c(8, "plain", "black"), font.tickslab=c(8, "plain", "black"), font.legend=c(8, "plain", "black")),
+    xlim = c(0,3100), xlab = "Days since diagnosis", break.time.by = 600, font.family="sans", ylab="Cumulative incidence of corticosteroid use (500 mg)", axes.offset=F, ylim=c(0,0.8), censor=F)
+
+f3$table$theme$axis.text.y$colour <- "black"
+
+f3$table <- f3$table +theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), axis.title.y=element_blank(),axis.line.y = element_blank(), axis.line.x = element_blank(), axis.ticks.y=element_blank())
+
+
+
+fig_total <- ggarrange(f1$plot+theme(plot.margin = margin(0.2,0.2,0.2,1.3, "cm")), f1$table+theme(plot.margin = margin(0.2,3.2,0.2,0.2, "cm")),
+                       f2$plot+theme(plot.margin = margin(0.2,0.2,0.2,1.3, "cm")), f2$table+theme(plot.margin = margin(0.2,3.2,0.2,0.2, "cm")),
+                       f3$plot+theme(plot.margin = margin(0.2,0.2,0.2,1.3, "cm")), f3$table+theme(plot.margin = margin(0.2,3.2,0.2,0.2, "cm")),
+                       ncol=1, nrow=6, heights = c(1,0.2,1,0.2,1,0.2),
+                       labels=c("A)", "No. at risk", "B)", "No. at risk", "C)", "No. at risk"), 
+                       font.label = list(size=8, family="sans", face="bold"))
+
+ggsave(fig_total, filename=paste0(path_project, "/Output/illustrations/Figure2_letter.pdf"), width = 174, height =261, units = "mm", dpi=400, bg="transparent")
+
+```
+
